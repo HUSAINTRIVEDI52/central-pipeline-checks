@@ -1,0 +1,543 @@
+name: Security Scanning Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    - cron: "0 0 * * *" # Nightly at 00:00 UTC
+  workflow_dispatch:
+    inputs:
+      zap_scan_type:
+        description: "ZAP scan type (baseline or full)"
+        required: false
+        default: "baseline"
+        type: choice
+        options:
+          - baseline
+          - full
+
+env:
+  REPORTS_DIR: ./reports
+  NODE_VERSION: "18"
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1 — SETUP
+  # ─────────────────────────────────────────────
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    environment: sandbox
+    outputs:
+      sonar_reachable: ${{ steps.sonar-check.outputs.reachable }}
+      dojo_reachable: ${{ steps.dojo-check.outputs.reachable }}
+      zap_mode: ${{ steps.zap-mode.outputs.mode }}
+      run_date: ${{ steps.meta.outputs.date }}
+      short_sha: ${{ steps.meta.outputs.sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache SonarQube scanner
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: sonar-${{ runner.os }}-${{ hashFiles('**/sonar-project.properties') }}
+          restore-keys: sonar-${{ runner.os }}-
+
+      - name: Cache NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.dependency-check/data
+          key: nvd-${{ runner.os }}-${{ steps.week.outputs.week }}
+          restore-keys: nvd-${{ runner.os }}-
+
+      - name: Get week number for NVD cache key
+        id: week
+        run: echo "week=$(date +%Y-W%V)" >> $GITHUB_OUTPUT
+
+      - name: Set run metadata
+        id: meta
+        run: |
+          echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          echo "sha=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: Determine ZAP scan mode
+        id: zap-mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.zap_scan_type }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/main" ] || \
+               [ "${{ github.ref }}" = "refs/heads/develop" ] || \
+               [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "mode=full" >> $GITHUB_OUTPUT
+          else
+            echo "mode=baseline" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check SonarQube reachability (No-IP DNS)
+        id: sonar-check
+        run: bash .github/scripts/check-dns.sh "${{ secrets.SONAR_HOST_URL }}" sonar
+        continue-on-error: true
+
+      - name: Check DefectDojo reachability (No-IP DNS)
+        id: dojo-check
+        run: bash .github/scripts/check-dns.sh "${{ secrets.DEFECTDOJO_URL }}" dojo
+
+  # ─────────────────────────────────────────────
+  # JOB 2 — SONARQUBE SAST SCAN
+  # ─────────────────────────────────────────────
+  sonarqube-scan:
+    name: SonarQube SAST Scan
+    runs-on: ubuntu-latest
+    environment: sandbox
+    needs: setup
+    continue-on-error: true
+    if: needs.setup.outputs.sonar_reachable == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history needed for SonarQube blame info
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore SonarQube cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: sonar-${{ runner.os }}-${{ hashFiles('**/sonar-project.properties') }}
+
+      - name: Run SonarQube analysis
+        uses: SonarSource/sonarqube-scan-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Wait for Quality Gate result
+        id: quality-gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Export SonarQube findings as JSON
+        run: |
+          mkdir -p ${{ env.REPORTS_DIR }}
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${{ secrets.SONAR_PROJECT_KEY }}&resolved=false&ps=500" \
+            -o ${{ env.REPORTS_DIR }}/sonarqube-report.json
+          echo "SonarQube report size: $(wc -c < ${{ env.REPORTS_DIR }}/sonarqube-report.json) bytes"
+
+      - name: Upload SonarQube report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-report
+          path: ${{ env.REPORTS_DIR }}/sonarqube-report.json
+          retention-days: 7
+
+      - name: Set scan status output
+        id: status
+        run: |
+          if [ "${{ steps.quality-gate.outcome }}" = "success" ]; then
+            echo "result=passed" >> $GITHUB_OUTPUT
+          else
+            echo "result=failed" >> $GITHUB_OUTPUT
+          fi
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — OWASP DEPENDENCY-CHECK SCA SCAN
+  # ─────────────────────────────────────────────
+  dependency-check:
+    name: OWASP Dependency-Check SCA
+    runs-on: ubuntu-latest
+    environment: sandbox
+    needs: setup
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore NVD database cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.dependency-check/data
+          key: nvd-${{ runner.os }}-${{ needs.setup.outputs.run_date }}
+          restore-keys: nvd-${{ runner.os }}-
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "${{ github.repository }}"
+          path: "."
+          format: "XML"
+          out: ${{ env.REPORTS_DIR }}
+          args: >-
+            --nvdApiKey ${{ secrets.NVD_API_KEY }}
+            --enableRetired
+            --enableExperimental
+            --failOnCVSS 0
+        continue-on-error: true
+
+      - name: Verify report was produced
+        id: verify
+        run: |
+          if [ -f "${{ env.REPORTS_DIR }}/dependency-check-report.xml" ]; then
+            echo "result=passed" >> $GITHUB_OUTPUT
+            echo "Dependency-Check report generated successfully"
+          else
+            echo "result=failed" >> $GITHUB_OUTPUT
+            echo "WARNING: No dependency-check report found"
+          fi
+
+      - name: Upload Dependency-Check report artifact
+        uses: actions/upload-artifact@v4
+        if: steps.verify.outputs.result == 'passed'
+        with:
+          name: dependency-check-report
+          path: ${{ env.REPORTS_DIR }}/dependency-check-report.xml
+          retention-days: 7
+
+      - name: Save updated NVD cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.dependency-check/data
+          key: nvd-${{ runner.os }}-${{ needs.setup.outputs.run_date }}
+
+  # ─────────────────────────────────────────────
+  # JOB 4 — OWASP ZAP DAST SCAN
+  # ─────────────────────────────────────────────
+  zap-scan:
+    name: OWASP ZAP DAST Scan
+    runs-on: ubuntu-latest
+    environment: sandbox
+    needs: setup
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Restore node_modules cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start Express application
+        run: |
+          NODE_ENV=test npm start &
+          echo "APP_PID=$!" >> $GITHUB_ENV
+          echo "Express app started with PID $APP_PID"
+
+      - name: Wait for app to be ready
+        run: bash .github/scripts/wait-for-app.sh "http://localhost:3000" 60
+
+      - name: Create reports directory
+        run: mkdir -p ${{ env.REPORTS_DIR }}
+
+      - name: Run ZAP Baseline Scan (PRs and feature branches)
+        if: needs.setup.outputs.zap_mode == 'baseline'
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "http://localhost:3000"
+          rules_file_name: ".github/security/zap/zap-rules.tsv"
+          cmd_options: "-J ${{ env.REPORTS_DIR }}/zap-report.json -x ${{ env.REPORTS_DIR }}/zap-report.xml"
+          fail_action: false
+        continue-on-error: true
+
+      - name: Run ZAP Full Scan (main, develop, nightly)
+        if: needs.setup.outputs.zap_mode == 'full'
+        uses: zaproxy/action-full-scan@v0.10.0
+        with:
+          target: "http://localhost:3000"
+          rules_file_name: ".github/security/zap/zap-rules.tsv"
+          cmd_options: "-J ${{ env.REPORTS_DIR }}/zap-report.json -x ${{ env.REPORTS_DIR }}/zap-report.xml"
+          fail_action: false
+        continue-on-error: true
+
+      - name: Stop Express application
+        if: always()
+        run: |
+          if [ -n "$APP_PID" ]; then
+            kill $APP_PID 2>/dev/null || true
+            echo "Express app stopped"
+          fi
+
+      - name: Verify ZAP report was produced
+        id: verify
+        run: |
+          if [ -f "${{ env.REPORTS_DIR }}/zap-report.xml" ]; then
+            echo "result=passed" >> $GITHUB_OUTPUT
+            echo "ZAP report generated: $(wc -c < ${{ env.REPORTS_DIR }}/zap-report.xml) bytes"
+          else
+            echo "result=failed" >> $GITHUB_OUTPUT
+            echo "WARNING: No ZAP report found"
+          fi
+
+      - name: Upload ZAP report artifact
+        uses: actions/upload-artifact@v4
+        if: steps.verify.outputs.result == 'passed'
+        with:
+          name: zap-report
+          path: |
+            ${{ env.REPORTS_DIR }}/zap-report.xml
+            ${{ env.REPORTS_DIR }}/zap-report.json
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # JOB 5 — IMPORT ALL REPORTS TO DEFECTDOJO
+  # ─────────────────────────────────────────────
+  import-to-defectdojo:
+    name: Import Reports to DefectDojo
+    runs-on: ubuntu-latest
+    environment: sandbox
+    needs: [setup, sonarqube-scan, dependency-check, zap-scan]
+    if: always() && needs.setup.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download SonarQube report
+        uses: actions/download-artifact@v4
+        with:
+          name: sonarqube-report
+          path: ${{ env.REPORTS_DIR }}
+        continue-on-error: true
+
+      - name: Download Dependency-Check report
+        uses: actions/download-artifact@v4
+        with:
+          name: dependency-check-report
+          path: ${{ env.REPORTS_DIR }}
+        continue-on-error: true
+
+      - name: Download ZAP report
+        uses: actions/download-artifact@v4
+        with:
+          name: zap-report
+          path: ${{ env.REPORTS_DIR }}
+        continue-on-error: true
+
+      - name: Verify DefectDojo is reachable
+        run: bash .github/scripts/check-dns.sh "${{ secrets.DEFECTDOJO_URL }}" dojo
+
+      - name: Import SonarQube report to DefectDojo
+        id: import-sonar
+        if: hashFiles('./reports/sonarqube-report.json') != ''
+        run: |
+          bash .github/scripts/import-to-defectdojo.sh \
+            "${{ secrets.DEFECTDOJO_URL }}" \
+            "${{ secrets.DEFECTDOJO_API_KEY }}" \
+            "${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            "${{ env.REPORTS_DIR }}/sonarqube-report.json" \
+            "SonarQube Scan" \
+            "${{ github.sha }}" \
+            "${{ github.ref_name }}"
+        continue-on-error: true
+
+      - name: Import Dependency-Check report to DefectDojo
+        id: import-depcheck
+        if: hashFiles('./reports/dependency-check-report.xml') != ''
+        run: |
+          bash .github/scripts/import-to-defectdojo.sh \
+            "${{ secrets.DEFECTDOJO_URL }}" \
+            "${{ secrets.DEFECTDOJO_API_KEY }}" \
+            "${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            "${{ env.REPORTS_DIR }}/dependency-check-report.xml" \
+            "dependency-check" \
+            "${{ github.sha }}" \
+            "${{ github.ref_name }}"
+        continue-on-error: true
+
+      - name: Import ZAP report to DefectDojo
+        id: import-zap
+        if: hashFiles('./reports/zap-report.xml') != ''
+        run: |
+          bash .github/scripts/import-to-defectdojo.sh \
+            "${{ secrets.DEFECTDOJO_URL }}" \
+            "${{ secrets.DEFECTDOJO_API_KEY }}" \
+            "${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            "${{ env.REPORTS_DIR }}/zap-report.xml" \
+            "ZAP Scan" \
+            "${{ github.sha }}" \
+            "${{ github.ref_name }}"
+        continue-on-error: true
+
+      - name: Verify at least one import succeeded
+        run: |
+          SONAR="${{ steps.import-sonar.outcome }}"
+          DEPCHECK="${{ steps.import-depcheck.outcome }}"
+          ZAP="${{ steps.import-zap.outcome }}"
+          echo "Import results — SonarQube: $SONAR | Dep-Check: $DEPCHECK | ZAP: $ZAP"
+          if [ "$SONAR" != "success" ] && [ "$DEPCHECK" != "success" ] && [ "$ZAP" != "success" ]; then
+            echo "ERROR: All imports failed. Cannot generate a report."
+            exit 1
+          fi
+          echo "At least one import succeeded. Proceeding to report generation."
+
+  # ─────────────────────────────────────────────
+  # JOB 6 — GENERATE & DOWNLOAD REPORT
+  # ─────────────────────────────────────────────
+  generate-report:
+    name: Generate DefectDojo Report
+    runs-on: ubuntu-latest
+    environment: sandbox
+    needs: [setup, import-to-defectdojo]
+    if: always() && needs.import-to-defectdojo.result == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set report filename base
+        id: filename
+        run: |
+          BRANCH=$(echo "${{ github.ref_name }}" | tr '/' '-')
+          SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          DATE=$(date +%Y-%m-%d)
+          echo "base=security-report-${BRANCH}-${SHA}-${DATE}" >> $GITHUB_OUTPUT
+
+      - name: Attempt PDF report generation
+        id: pdf
+        run: |
+          mkdir -p ${{ env.REPORTS_DIR }}
+          HTTP_STATUS=$(curl -s -o ${{ env.REPORTS_DIR }}/report.pdf -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"engagement\": ${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}, \"include_finding_notes\": true, \"include_finding_images\": false, \"include_executive_summary\": true, \"include_table_of_contents\": true}" \
+            "${{ secrets.DEFECTDOJO_URL }}/api/v2/reports/generate/")
+          FILE_SIZE=$(wc -c < ${{ env.REPORTS_DIR }}/report.pdf 2>/dev/null || echo 0)
+          if [ "$HTTP_STATUS" = "200" ] && [ "$FILE_SIZE" -gt "1000" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "PDF report generated: ${FILE_SIZE} bytes"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "PDF failed (HTTP $HTTP_STATUS, size $FILE_SIZE). Trying HTML..."
+          fi
+        continue-on-error: true
+
+      - name: Fallback — HTML report generation
+        id: html
+        if: steps.pdf.outputs.status != 'success'
+        run: |
+          HTTP_STATUS=$(curl -s -o ${{ env.REPORTS_DIR }}/report.html -w "%{http_code}" \
+            -X GET \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            "${{ secrets.DEFECTDOJO_URL }}/api/v2/engagements/${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}/findings/")
+          FILE_SIZE=$(wc -c < ${{ env.REPORTS_DIR }}/report.html 2>/dev/null || echo 0)
+          if [ "$HTTP_STATUS" = "200" ] && [ "$FILE_SIZE" -gt "100" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "HTML report generated: ${FILE_SIZE} bytes"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "HTML failed. Trying JSON export..."
+          fi
+        continue-on-error: true
+
+      - name: Fallback — JSON findings export
+        id: json
+        if: steps.pdf.outputs.status != 'success' && steps.html.outputs.status != 'success'
+        run: |
+          HTTP_STATUS=$(curl -s -o ${{ env.REPORTS_DIR }}/report.json -w "%{http_code}" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            "${{ secrets.DEFECTDOJO_URL }}/api/v2/findings/?engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}&limit=500")
+          FILE_SIZE=$(wc -c < ${{ env.REPORTS_DIR }}/report.json 2>/dev/null || echo 0)
+          if [ "$HTTP_STATUS" = "200" ] && [ "$FILE_SIZE" -gt "10" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "JSON export generated: ${FILE_SIZE} bytes"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "ERROR: All report formats failed."
+            exit 1
+          fi
+
+      - name: Rename report to final filename
+        run: |
+          BASE="${{ steps.filename.outputs.base }}"
+          if [ "${{ steps.pdf.outputs.status }}" = "success" ]; then
+            mv ${{ env.REPORTS_DIR }}/report.pdf ${{ env.REPORTS_DIR }}/${BASE}.pdf
+            echo "REPORT_FILE=${BASE}.pdf" >> $GITHUB_ENV
+          elif [ "${{ steps.html.outputs.status }}" = "success" ]; then
+            mv ${{ env.REPORTS_DIR }}/report.html ${{ env.REPORTS_DIR }}/${BASE}.html
+            echo "REPORT_FILE=${BASE}.html" >> $GITHUB_ENV
+          else
+            mv ${{ env.REPORTS_DIR }}/report.json ${{ env.REPORTS_DIR }}/${BASE}.json
+            echo "REPORT_FILE=${BASE}.json" >> $GITHUB_ENV
+          fi
+          echo "Final report: $REPORT_FILE"
+
+      - name: Upload final report as GitHub artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.filename.outputs.base }}
+          path: ${{ env.REPORTS_DIR }}/${{ env.REPORT_FILE }}
+          retention-days: 30
+
+      - name: Write job summary
+        run: |
+          echo "## Security Scan Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`$(echo ${{ github.sha }} | cut -c1-8)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Date | $(date +%Y-%m-%d) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Report | \`${{ env.REPORT_FILE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| SonarQube | ${{ needs.sonarqube-scan.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency-Check | ${{ needs.dependency-check.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ZAP | ${{ needs.zap-scan.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Report available in the Artifacts section above.**" >> $GITHUB_STEP_SUMMARY
