@@ -300,7 +300,7 @@ do_import \
 
 do_import \
   "${REPORTS_DIR}/dependency-check-report.xml" \
-  "Dependency Check" \
+  "Dependency Check Scan" \
   "Dependency-Check" || true
 
 if [ "${IMPORT_COUNT}" -eq 0 ]; then
