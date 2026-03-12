@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to LocalIt</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            padding: 40px 30px;
+            text-align: center;
+            color: white;
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .content {
+            padding: 40px 30px;
+        }
+        .greeting {
+            font-size: 24px;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 20px;
+        }
+        .message {
+            font-size: 16px;
+            line-height: 1.6;
+            color: #4b5563;
+            margin-bottom: 30px;
+        }
+        .features {
+            background-color: #f9fafb;
+            padding: 20px;
+            border-radius: 6px;
+            margin: 30px 0;
+        }
+        .feature {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .feature:last-child {
+            margin-bottom: 0;
+        }
+        .feature-icon {
+            width: 24px;
+            height: 24px;
+            background-color: #6366f1;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            color: white;
+            font-weight: bold;
+        }
+        .cta-button {
+            display: inline-block;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white;
+            padding: 14px 30px;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            margin: 20px 0;
+        }
+        .footer {
+            background-color: #f9fafb;
+            padding: 30px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+        }
+        .social-links {
+            margin: 20px 0;
+        }
+        .social-link {
+            display: inline-block;
+            margin: 0 10px;
+            color: #6366f1;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">LocalIt</div>
+            <div>Your Hyperlocal Delivery Platform</div>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">Welcome to LocalIt, {{userName}}! 🎉</div>
+            
+            <div class="message">
+                Thank you for joining LocalIt, your neighborhood's premier delivery platform. We're excited to connect you with local businesses and bring everything you need right to your doorstep.
+            </div>
+            
+            <div class="features">
+                <div class="feature">
+                    <div class="feature-icon">🛒</div>
+                    <div>Browse products from local shops near you</div>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🚚</div>
+                    <div>Fast delivery within 30-45 minutes</div>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">💰</div>
+                    <div>Multiple payment options including COD</div>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">📱</div>
+                    <div>Real-time order tracking</div>
+                </div>
+            </div>
+            
+            <div class="message">
+                Ready to explore? Start by discovering amazing local businesses in your area and place your first order today!
+            </div>
+            
+            <center>
+                <a href="{{appUrl}}" class="cta-button">Start Shopping Now</a>
+            </center>
+            
+            <div class="message">
+                <strong>Need help?</strong> Our support team is here for you 24/7. Contact us at 
+                <a href="mailto:support@localit.app">support@localit.app</a> or call 
+                <a href="tel:+918800123456">+91-8800-123-456</a>.
+            </div>
+        </div>
+        
+        <div class="footer">
+            <div>Follow us for updates and exclusive offers:</div>
+            <div class="social-links">
+                <a href="#" class="social-link">Facebook</a>
+                <a href="#" class="social-link">Twitter</a>
+                <a href="#" class="social-link">Instagram</a>
+            </div>
+            <div>
+                © 2024 LocalIt Technologies Pvt. Ltd. All rights reserved.<br>
+                <a href="{{appUrl}}/privacy">Privacy Policy</a> | 
+                <a href="{{appUrl}}/terms">Terms of Service</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

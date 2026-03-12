@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your OTP Code - LocalIt</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 500px;
+            margin: 40px auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            padding: 30px;
+            text-align: center;
+            color: white;
+        }
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .content {
+            padding: 40px 30px;
+            text-align: center;
+        }
+        .greeting {
+            font-size: 20px;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 20px;
+        }
+        .message {
+            font-size: 16px;
+            line-height: 1.6;
+            color: #4b5563;
+            margin-bottom: 30px;
+        }
+        .otp-container {
+            background-color: #f9fafb;
+            border: 2px dashed #6366f1;
+            border-radius: 8px;
+            padding: 30px;
+            margin: 30px 0;
+        }
+        .otp-code {
+            font-size: 36px;
+            font-weight: bold;
+            color: #6366f1;
+            letter-spacing: 8px;
+            margin: 10px 0;
+        }
+        .otp-label {
+            font-size: 14px;
+            color: #6b7280;
+            margin-bottom: 10px;
+        }
+        .warning {
+            background-color: #fef3c7;
+            color: #d97706;
+            padding: 15px;
+            border-radius: 6px;
+            font-size: 14px;
+            margin: 20px 0;
+        }
+        .footer {
+            background-color: #f9fafb;
+            padding: 20px 30px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">LocalIt</div>
+            <div>Verification Code</div>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">Hi {{userName}}! 👋</div>
+            
+            <div class="message">
+                To complete your {{action}}, please use the verification code below:
+            </div>
+            
+            <div class="otp-container">
+                <div class="otp-label">Your verification code is:</div>
+                <div class="otp-code">{{otp}}</div>
+            </div>
+            
+            <div class="warning">
+                ⚠️ This code will expire in <strong>10 minutes</strong>. Please do not share this code with anyone for your security.
+            </div>
+            
+            <div class="message">
+                If you didn't request this code, please ignore this email or contact our support team immediately.
+            </div>
+        </div>
+        
+        <div class="footer">
+            <div>
+                Need help? Contact us at 
+                <a href="mailto:support@localit.app">support@localit.app</a>
+            </div>
+            <div style="margin-top: 10px;">
+                © 2024 LocalIt Technologies Pvt. Ltd.
+            </div>
+        </div>
+    </div>
+</body>
+</html>

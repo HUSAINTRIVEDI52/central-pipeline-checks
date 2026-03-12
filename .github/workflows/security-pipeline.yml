@@ -1,5 +1,18 @@
 name: Security Scanning Pipeline
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Actions = thin trigger only.
+# All scans run on YOUR GCP VM via IAP SSH using the SA key.
+# Only the final report comes back here as a downloadable artifact.
+#
+# Secrets needed (all already set as Repository secrets):
+#   GCP_SA_KEY, GCP_PROJECT_ID, GCP_VM_NAME, GCP_VM_ZONE
+#   SONAR_HOST_URL, SONAR_TOKEN, SONAR_PROJECT_KEY
+#   NVD_API_KEY
+#   DEFECTDOJO_URL, DEFECTDOJO_API_KEY,
+#   DEFECTDOJO_ENGAGEMENT_ID, DEFECTDOJO_PRODUCT_ID
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
   push:
     branches:
@@ -14,7 +27,7 @@ on:
       - main
       - develop
   schedule:
-    - cron: "0 0 * * *" # Nightly at 00:00 UTC
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       zap_scan_type:
@@ -26,67 +39,46 @@ on:
           - baseline
           - full
 
-env:
-  REPORTS_DIR: ./reports
-  NODE_VERSION: "18"
-
 jobs:
-  # ─────────────────────────────────────────────
-  # JOB 1 — SETUP
-  # ─────────────────────────────────────────────
-  setup:
-    name: Setup Environment
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — AUTH + VERIFY VM CONNECTION
+  # ───────────────────────────────────────────────────────────────────────────
+  prepare:
+    name: "GCP Auth & VM Check"
     runs-on: ubuntu-latest
-    environment: sandbox
     outputs:
-      sonar_reachable: ${{ steps.sonar-check.outputs.reachable }}
-      dojo_reachable: ${{ steps.dojo-check.outputs.reachable }}
-      zap_mode: ${{ steps.zap-mode.outputs.mode }}
-      run_date: ${{ steps.meta.outputs.date }}
-      short_sha: ${{ steps.meta.outputs.sha }}
+      zap_mode:    ${{ steps.zap-mode.outputs.mode }}
+      short_sha:   ${{ steps.meta.outputs.short_sha }}
+      run_date:    ${{ steps.meta.outputs.run_date }}
+      report_name: ${{ steps.meta.outputs.report_name }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+      - name: Authenticate to GCP via Service Account key
+        uses: google-github-actions/auth@v2
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Cache node_modules
-        uses: actions/cache@v4
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
         with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Cache SonarQube scanner
-        uses: actions/cache@v4
-        with:
-          path: ~/.sonar/cache
-          key: sonar-${{ runner.os }}-${{ hashFiles('**/sonar-project.properties') }}
-          restore-keys: sonar-${{ runner.os }}-
-
-      - name: Cache NVD database
-        uses: actions/cache@v4
-        with:
-          path: ~/.dependency-check/data
-          key: nvd-${{ runner.os }}-${{ steps.week.outputs.week }}
-          restore-keys: nvd-${{ runner.os }}-
-
-      - name: Get week number for NVD cache key
-        id: week
-        run: echo "week=$(date +%Y-W%V)" >> $GITHUB_OUTPUT
+      - name: Install gcloud beta components (needed for IAP tunnel)
+        run: gcloud components install beta --quiet 2>/dev/null || true
 
       - name: Set run metadata
         id: meta
         run: |
-          echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
-          echo "sha=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          RUN_DATE=$(date +%Y-%m-%d)
+          BRANCH=$(echo "${{ github.ref_name }}" | tr '/' '-')
+          echo "short_sha=${SHORT_SHA}"    >> $GITHUB_OUTPUT
+          echo "run_date=${RUN_DATE}"      >> $GITHUB_OUTPUT
+          echo "report_name=security-report-${BRANCH}-${SHORT_SHA}-${RUN_DATE}" >> $GITHUB_OUTPUT
 
       - name: Determine ZAP scan mode
         id: zap-mode
@@ -100,432 +92,247 @@ jobs:
           else
             echo "mode=baseline" >> $GITHUB_OUTPUT
           fi
+          echo "ZAP mode set"
 
-      - name: Check SonarQube reachability (No-IP DNS)
-        id: sonar-check
-        run: bash .github/scripts/check-dns.sh "${{ secrets.SONAR_HOST_URL }}" sonar
-        continue-on-error: true
-
-      - name: Check DefectDojo reachability (No-IP DNS)
-        id: dojo-check
-        run: bash .github/scripts/check-dns.sh "${{ secrets.DEFECTDOJO_URL }}" dojo
-
-  # ─────────────────────────────────────────────
-  # JOB 2 — SONARQUBE SAST SCAN
-  # ─────────────────────────────────────────────
-  sonarqube-scan:
-    name: SonarQube SAST Scan
-    runs-on: ubuntu-latest
-    environment: sandbox
-    needs: setup
-    continue-on-error: true
-    if: needs.setup.outputs.sonar_reachable == 'true'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Full history needed for SonarQube blame info
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Restore node_modules cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Restore SonarQube cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.sonar/cache
-          key: sonar-${{ runner.os }}-${{ hashFiles('**/sonar-project.properties') }}
-
-      - name: Run SonarQube analysis
-        uses: SonarSource/sonarqube-scan-action@v2
+      # ZONE FIX: zone and project passed THREE ways so gcloud is never confused:
+      #   1. CLOUDSDK_COMPUTE_ZONE env var
+      #   2. CLOUDSDK_CORE_PROJECT env var
+      #   3. --zone and --project explicit flags on every command
+      - name: Verify IAP SSH connection to GCP VM
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute ssh \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --ssh-flag="-o BatchMode=no" \
+            --ssh-flag="-o ConnectTimeout=30" \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }} \
+            --command="echo VM_OK"
+        timeout-minutes: 3
 
-      - name: Wait for Quality Gate result
-        id: quality-gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        timeout-minutes: 5
-        continue-on-error: true
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — PUSH CODE TO GCP VM
+  # ───────────────────────────────────────────────────────────────────────────
+  sync-code:
+    name: "Push Code to GCP VM"
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Create workspace directories on VM
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-      - name: Export SonarQube findings as JSON
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          mkdir -p ${{ env.REPORTS_DIR }}
-          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${{ secrets.SONAR_PROJECT_KEY }}&resolved=false&ps=500" \
-            -o ${{ env.REPORTS_DIR }}/sonarqube-report.json
-          echo "SonarQube report size: $(wc -c < ${{ env.REPORTS_DIR }}/sonarqube-report.json) bytes"
+          gcloud compute ssh \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }} \
+            --command="mkdir -p ~/security-scan/app ~/security-scan/reports ~/security-scan/scripts && echo DIRS_OK"
 
-      - name: Upload SonarQube report artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sonarqube-report
-          path: ${{ env.REPORTS_DIR }}/sonarqube-report.json
-          retention-days: 7
-
-      - name: Set scan status output
-        id: status
+      - name: Copy repo to VM via IAP
+        env:
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          if [ "${{ steps.quality-gate.outcome }}" = "success" ]; then
-            echo "result=passed" >> $GITHUB_OUTPUT
-          else
-            echo "result=failed" >> $GITHUB_OUTPUT
-          fi
+          gcloud compute scp \
+            --recurse \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            . \
+            ${{ secrets.GCP_VM_NAME }}:~/security-scan/app/
 
-  # ─────────────────────────────────────────────
-  # JOB 3 — OWASP DEPENDENCY-CHECK SCA SCAN
-  # ─────────────────────────────────────────────
-  dependency-check:
-    name: OWASP Dependency-Check SCA
+      - name: Copy scan script to VM and make executable
+        env:
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute scp \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            .github/scripts/run-all-scans.sh \
+            ${{ secrets.GCP_VM_NAME }}:~/security-scan/scripts/run-all-scans.sh
+
+          gcloud compute ssh \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }} \
+            --command="chmod +x ~/security-scan/scripts/run-all-scans.sh && echo SCRIPT_OK"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — RUN ALL SCANS ON GCP VM
+  # ───────────────────────────────────────────────────────────────────────────
+  run-scans:
+    name: "Run All Scans on GCP VM"
     runs-on: ubuntu-latest
-    environment: sandbox
-    needs: setup
-    continue-on-error: true
+    needs: [prepare, sync-code]
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Restore NVD database cache
-        uses: actions/cache@v4
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
         with:
-          path: ~/.dependency-check/data
-          key: nvd-${{ runner.os }}-${{ needs.setup.outputs.run_date }}
-          restore-keys: nvd-${{ runner.os }}-
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Run OWASP Dependency-Check
-        uses: dependency-check/Dependency-Check_Action@main
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
         with:
-          project: "${{ github.repository }}"
-          path: "."
-          format: "XML"
-          out: ${{ env.REPORTS_DIR }}
-          args: >-
-            --nvdApiKey ${{ secrets.NVD_API_KEY }}
-            --enableRetired
-            --enableExperimental
-            --failOnCVSS 0
-        continue-on-error: true
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Verify report was produced
-        id: verify
+      - name: SSH into VM and execute all scans
+        env:
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          if [ -f "${{ env.REPORTS_DIR }}/dependency-check-report.xml" ]; then
-            echo "result=passed" >> $GITHUB_OUTPUT
-            echo "Dependency-Check report generated successfully"
-          else
-            echo "result=failed" >> $GITHUB_OUTPUT
-            echo "WARNING: No dependency-check report found"
-          fi
+          gcloud compute ssh \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }} \
+            --command="
+              export ZAP_MODE='${{ needs.prepare.outputs.zap_mode }}'
+              export GIT_SHA='${{ github.sha }}'
+              export GIT_BRANCH='${{ github.ref_name }}'
+              export RUN_DATE='${{ needs.prepare.outputs.run_date }}'
+              export SONAR_HOST_URL='${{ secrets.SONAR_HOST_URL }}'
+              export SONAR_TOKEN='${{ secrets.SONAR_TOKEN }}'
+              export SONAR_PROJECT_KEY='${{ secrets.SONAR_PROJECT_KEY }}'
+              export NVD_API_KEY='${{ secrets.NVD_API_KEY }}'
+              export DEFECTDOJO_URL='${{ secrets.DEFECTDOJO_URL }}'
+              export DEFECTDOJO_API_KEY='${{ secrets.DEFECTDOJO_API_KEY }}'
+              export DEFECTDOJO_ENGAGEMENT_ID='${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}'
+              export DEFECTDOJO_PRODUCT_ID='${{ secrets.DEFECTDOJO_PRODUCT_ID }}'
+              bash ~/security-scan/scripts/run-all-scans.sh
+            "
+        timeout-minutes: 75
 
-      - name: Upload Dependency-Check report artifact
-        uses: actions/upload-artifact@v4
-        if: steps.verify.outputs.result == 'passed'
-        with:
-          name: dependency-check-report
-          path: ${{ env.REPORTS_DIR }}/dependency-check-report.xml
-          retention-days: 7
-
-      - name: Save updated NVD cache
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: ~/.dependency-check/data
-          key: nvd-${{ runner.os }}-${{ needs.setup.outputs.run_date }}
-
-  # ─────────────────────────────────────────────
-  # JOB 4 — OWASP ZAP DAST SCAN
-  # ─────────────────────────────────────────────
-  zap-scan:
-    name: OWASP ZAP DAST Scan
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 4 — PULL REPORT BACK AS GITHUB ARTIFACT
+  # ───────────────────────────────────────────────────────────────────────────
+  collect-report:
+    name: "Pull Report → GitHub Artifact"
     runs-on: ubuntu-latest
-    environment: sandbox
-    needs: setup
-    continue-on-error: true
+    needs: [prepare, run-scans]
+    if: always() && needs.run-scans.result != 'cancelled'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Restore node_modules cache
-        uses: actions/cache@v4
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
         with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Create local reports directory
+        run: mkdir -p ./reports
 
-      - name: Start Express application
+      - name: Find and copy final report from VM
+        id: copy
+        env:
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          NODE_ENV=test npm start &
-          echo "APP_PID=$!" >> $GITHUB_ENV
-          echo "Express app started with PID $APP_PID"
+          # Find which format the VM produced (PDF, HTML, or JSON)
+          REPORT=$(gcloud compute ssh \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }} \
+            --command="ls ~/security-scan/reports/final-report.* 2>/dev/null | head -1" \
+            2>/dev/null || echo "")
 
-      - name: Wait for app to be ready
-        run: bash .github/scripts/wait-for-app.sh "http://localhost:3000" 60
-
-      - name: Create reports directory
-        run: mkdir -p ${{ env.REPORTS_DIR }}
-
-      - name: Run ZAP Baseline Scan (PRs and feature branches)
-        if: needs.setup.outputs.zap_mode == 'baseline'
-        uses: zaproxy/action-baseline@v0.12.0
-        with:
-          target: "http://localhost:3000"
-          rules_file_name: ".github/security/zap/zap-rules.tsv"
-          cmd_options: "-J ${{ env.REPORTS_DIR }}/zap-report.json -x ${{ env.REPORTS_DIR }}/zap-report.xml"
-          fail_action: false
-        continue-on-error: true
-
-      - name: Run ZAP Full Scan (main, develop, nightly)
-        if: needs.setup.outputs.zap_mode == 'full'
-        uses: zaproxy/action-full-scan@v0.10.0
-        with:
-          target: "http://localhost:3000"
-          rules_file_name: ".github/security/zap/zap-rules.tsv"
-          cmd_options: "-J ${{ env.REPORTS_DIR }}/zap-report.json -x ${{ env.REPORTS_DIR }}/zap-report.xml"
-          fail_action: false
-        continue-on-error: true
-
-      - name: Stop Express application
-        if: always()
-        run: |
-          if [ -n "$APP_PID" ]; then
-            kill $APP_PID 2>/dev/null || true
-            echo "Express app stopped"
-          fi
-
-      - name: Verify ZAP report was produced
-        id: verify
-        run: |
-          if [ -f "${{ env.REPORTS_DIR }}/zap-report.xml" ]; then
-            echo "result=passed" >> $GITHUB_OUTPUT
-            echo "ZAP report generated: $(wc -c < ${{ env.REPORTS_DIR }}/zap-report.xml) bytes"
+          if [ -n "${REPORT}" ]; then
+            echo "Report found: ${REPORT}"
+            gcloud compute scp \
+              --project="${{ secrets.GCP_PROJECT_ID }}" \
+              --zone="${{ secrets.GCP_VM_ZONE }}" \
+              --tunnel-through-iap \
+              --strict-host-key-checking=no \
+              --quiet \
+              ${{ secrets.GCP_VM_NAME }}:"${REPORT}" ./reports/
+            EXT="${REPORT##*.}"
+            mv "./reports/final-report.${EXT}" \
+               "./reports/${{ needs.prepare.outputs.report_name }}.${EXT}"
+            echo "report_file=${{ needs.prepare.outputs.report_name }}.${EXT}" >> $GITHUB_OUTPUT
           else
-            echo "result=failed" >> $GITHUB_OUTPUT
-            echo "WARNING: No ZAP report found"
+            echo "No final report found — pulling all raw scan reports"
+            gcloud compute scp \
+              --recurse \
+              --project="${{ secrets.GCP_PROJECT_ID }}" \
+              --zone="${{ secrets.GCP_VM_ZONE }}" \
+              --tunnel-through-iap \
+              --strict-host-key-checking=no \
+              --quiet \
+              ${{ secrets.GCP_VM_NAME }}:~/security-scan/reports/ \
+              ./reports/ || true
           fi
 
-      - name: Upload ZAP report artifact
-        uses: actions/upload-artifact@v4
-        if: steps.verify.outputs.result == 'passed'
-        with:
-          name: zap-report
-          path: |
-            ${{ env.REPORTS_DIR }}/zap-report.xml
-            ${{ env.REPORTS_DIR }}/zap-report.json
-          retention-days: 7
-
-  # ─────────────────────────────────────────────
-  # JOB 5 — IMPORT ALL REPORTS TO DEFECTDOJO
-  # ─────────────────────────────────────────────
-  import-to-defectdojo:
-    name: Import Reports to DefectDojo
-    runs-on: ubuntu-latest
-    environment: sandbox
-    needs: [setup, sonarqube-scan, dependency-check, zap-scan]
-    if: always() && needs.setup.result == 'success'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download SonarQube report
-        uses: actions/download-artifact@v4
-        with:
-          name: sonarqube-report
-          path: ${{ env.REPORTS_DIR }}
-        continue-on-error: true
-
-      - name: Download Dependency-Check report
-        uses: actions/download-artifact@v4
-        with:
-          name: dependency-check-report
-          path: ${{ env.REPORTS_DIR }}
-        continue-on-error: true
-
-      - name: Download ZAP report
-        uses: actions/download-artifact@v4
-        with:
-          name: zap-report
-          path: ${{ env.REPORTS_DIR }}
-        continue-on-error: true
-
-      - name: Verify DefectDojo is reachable
-        run: bash .github/scripts/check-dns.sh "${{ secrets.DEFECTDOJO_URL }}" dojo
-
-      - name: Import SonarQube report to DefectDojo
-        id: import-sonar
-        if: hashFiles('./reports/sonarqube-report.json') != ''
+      - name: Copy scan log from VM
+        env:
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
         run: |
-          bash .github/scripts/import-to-defectdojo.sh \
-            "${{ secrets.DEFECTDOJO_URL }}" \
-            "${{ secrets.DEFECTDOJO_API_KEY }}" \
-            "${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
-            "${{ env.REPORTS_DIR }}/sonarqube-report.json" \
-            "SonarQube Scan" \
-            "${{ github.sha }}" \
-            "${{ github.ref_name }}"
-        continue-on-error: true
+          gcloud compute scp \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }}:~/security-scan/reports/scan.log \
+            ./reports/scan.log 2>/dev/null || echo "No scan log found"
 
-      - name: Import Dependency-Check report to DefectDojo
-        id: import-depcheck
-        if: hashFiles('./reports/dependency-check-report.xml') != ''
-        run: |
-          bash .github/scripts/import-to-defectdojo.sh \
-            "${{ secrets.DEFECTDOJO_URL }}" \
-            "${{ secrets.DEFECTDOJO_API_KEY }}" \
-            "${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
-            "${{ env.REPORTS_DIR }}/dependency-check-report.xml" \
-            "dependency-check" \
-            "${{ github.sha }}" \
-            "${{ github.ref_name }}"
-        continue-on-error: true
+          gcloud compute scp \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }}:~/security-scan/reports/app-startup.log \
+            ./reports/app-startup.log 2>/dev/null || echo "No app startup log found"
 
-      - name: Import ZAP report to DefectDojo
-        id: import-zap
-        if: hashFiles('./reports/zap-report.xml') != ''
-        run: |
-          bash .github/scripts/import-to-defectdojo.sh \
-            "${{ secrets.DEFECTDOJO_URL }}" \
-            "${{ secrets.DEFECTDOJO_API_KEY }}" \
-            "${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
-            "${{ env.REPORTS_DIR }}/zap-report.xml" \
-            "ZAP Scan" \
-            "${{ github.sha }}" \
-            "${{ github.ref_name }}"
-        continue-on-error: true
-
-      - name: Verify at least one import succeeded
-        run: |
-          SONAR="${{ steps.import-sonar.outcome }}"
-          DEPCHECK="${{ steps.import-depcheck.outcome }}"
-          ZAP="${{ steps.import-zap.outcome }}"
-          echo "Import results — SonarQube: $SONAR | Dep-Check: $DEPCHECK | ZAP: $ZAP"
-          if [ "$SONAR" != "success" ] && [ "$DEPCHECK" != "success" ] && [ "$ZAP" != "success" ]; then
-            echo "ERROR: All imports failed. Cannot generate a report."
-            exit 1
-          fi
-          echo "At least one import succeeded. Proceeding to report generation."
-
-  # ─────────────────────────────────────────────
-  # JOB 6 — GENERATE & DOWNLOAD REPORT
-  # ─────────────────────────────────────────────
-  generate-report:
-    name: Generate DefectDojo Report
-    runs-on: ubuntu-latest
-    environment: sandbox
-    needs: [setup, import-to-defectdojo]
-    if: always() && needs.import-to-defectdojo.result == 'success'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set report filename base
-        id: filename
-        run: |
-          BRANCH=$(echo "${{ github.ref_name }}" | tr '/' '-')
-          SHA=$(echo "${{ github.sha }}" | cut -c1-8)
-          DATE=$(date +%Y-%m-%d)
-          echo "base=security-report-${BRANCH}-${SHA}-${DATE}" >> $GITHUB_OUTPUT
-
-      - name: Attempt PDF report generation
-        id: pdf
-        run: |
-          mkdir -p ${{ env.REPORTS_DIR }}
-          HTTP_STATUS=$(curl -s -o ${{ env.REPORTS_DIR }}/report.pdf -w "%{http_code}" \
-            -X POST \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"engagement\": ${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}, \"include_finding_notes\": true, \"include_finding_images\": false, \"include_executive_summary\": true, \"include_table_of_contents\": true}" \
-            "${{ secrets.DEFECTDOJO_URL }}/api/v2/reports/generate/")
-          FILE_SIZE=$(wc -c < ${{ env.REPORTS_DIR }}/report.pdf 2>/dev/null || echo 0)
-          if [ "$HTTP_STATUS" = "200" ] && [ "$FILE_SIZE" -gt "1000" ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "PDF report generated: ${FILE_SIZE} bytes"
-          else
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "PDF failed (HTTP $HTTP_STATUS, size $FILE_SIZE). Trying HTML..."
-          fi
-        continue-on-error: true
-
-      - name: Fallback — HTML report generation
-        id: html
-        if: steps.pdf.outputs.status != 'success'
-        run: |
-          HTTP_STATUS=$(curl -s -o ${{ env.REPORTS_DIR }}/report.html -w "%{http_code}" \
-            -X GET \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
-            "${{ secrets.DEFECTDOJO_URL }}/api/v2/engagements/${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}/findings/")
-          FILE_SIZE=$(wc -c < ${{ env.REPORTS_DIR }}/report.html 2>/dev/null || echo 0)
-          if [ "$HTTP_STATUS" = "200" ] && [ "$FILE_SIZE" -gt "100" ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "HTML report generated: ${FILE_SIZE} bytes"
-          else
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "HTML failed. Trying JSON export..."
-          fi
-        continue-on-error: true
-
-      - name: Fallback — JSON findings export
-        id: json
-        if: steps.pdf.outputs.status != 'success' && steps.html.outputs.status != 'success'
-        run: |
-          HTTP_STATUS=$(curl -s -o ${{ env.REPORTS_DIR }}/report.json -w "%{http_code}" \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
-            "${{ secrets.DEFECTDOJO_URL }}/api/v2/findings/?engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}&limit=500")
-          FILE_SIZE=$(wc -c < ${{ env.REPORTS_DIR }}/report.json 2>/dev/null || echo 0)
-          if [ "$HTTP_STATUS" = "200" ] && [ "$FILE_SIZE" -gt "10" ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "JSON export generated: ${FILE_SIZE} bytes"
-          else
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "ERROR: All report formats failed."
-            exit 1
-          fi
-
-      - name: Rename report to final filename
-        run: |
-          BASE="${{ steps.filename.outputs.base }}"
-          if [ "${{ steps.pdf.outputs.status }}" = "success" ]; then
-            mv ${{ env.REPORTS_DIR }}/report.pdf ${{ env.REPORTS_DIR }}/${BASE}.pdf
-            echo "REPORT_FILE=${BASE}.pdf" >> $GITHUB_ENV
-          elif [ "${{ steps.html.outputs.status }}" = "success" ]; then
-            mv ${{ env.REPORTS_DIR }}/report.html ${{ env.REPORTS_DIR }}/${BASE}.html
-            echo "REPORT_FILE=${BASE}.html" >> $GITHUB_ENV
-          else
-            mv ${{ env.REPORTS_DIR }}/report.json ${{ env.REPORTS_DIR }}/${BASE}.json
-            echo "REPORT_FILE=${BASE}.json" >> $GITHUB_ENV
-          fi
-          echo "Final report: $REPORT_FILE"
-
-      - name: Upload final report as GitHub artifact
+      - name: Upload as GitHub artifact (30 days)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.filename.outputs.base }}
-          path: ${{ env.REPORTS_DIR }}/${{ env.REPORT_FILE }}
+          name: ${{ needs.prepare.outputs.report_name }}
+          path: ./reports/
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Write job summary
         run: |
@@ -533,11 +340,48 @@ jobs:
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | \`$(echo ${{ github.sha }} | cut -c1-8)\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Date | $(date +%Y-%m-%d) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Report | \`${{ env.REPORT_FILE }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| SonarQube | ${{ needs.sonarqube-scan.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dependency-Check | ${{ needs.dependency-check.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ZAP | ${{ needs.zap-scan.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ needs.prepare.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Date | ${{ needs.prepare.outputs.run_date }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ZAP Mode | ${{ needs.prepare.outputs.zap_mode }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ran on | GCP VM \`${{ secrets.GCP_VM_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Report | \`${{ steps.copy.outputs.report_file }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Report available in the Artifacts section above.**" >> $GITHUB_STEP_SUMMARY
+          echo "Download the report from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 5 — CLEANUP VM
+  # ───────────────────────────────────────────────────────────────────────────
+  cleanup:
+    name: "Cleanup VM Workspace"
+    runs-on: ubuntu-latest
+    needs: collect-report
+    if: always()
+
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Remove containers and app code from VM
+        env:
+          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute ssh \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --zone="${{ secrets.GCP_VM_ZONE }}" \
+            --tunnel-through-iap \
+            --strict-host-key-checking=no \
+            --quiet \
+            ${{ secrets.GCP_VM_NAME }} \
+            --command="
+              docker rm -f zap-scan dep-check mongo-scan redis-scan 2>/dev/null || true
+              rm -rf ~/security-scan/app/
+              echo CLEANUP_DONE
+            "
