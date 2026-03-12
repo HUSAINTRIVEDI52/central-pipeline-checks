@@ -198,6 +198,20 @@ log "-------------------------------------------------------"
 log "STEP 2: OWASP Dependency-Check SCA"
 log "-------------------------------------------------------"
 
+# Run npm install so node_modules exists for accurate dependency analysis
+# Without this, Dependency-Check only reads package-lock.json and misses many deps
+log "Running npm install to populate node_modules..."
+if [ -f "${APP_DIR}/package.json" ]; then
+  cd "${APP_DIR}"
+  npm install --ignore-scripts --prefer-offline 2>&1 || \
+    npm install --ignore-scripts 2>&1 || \
+    warn "npm install failed — Dependency-Check will use package-lock.json only"
+  cd - > /dev/null
+  ok "npm install complete (node_modules ready)"
+else
+  warn "No package.json found at ${APP_DIR} — skipping npm install"
+fi
+
 docker rm -f dep-check 2>/dev/null || true
 
 # Ensure host dirs are fully writable before mounting
@@ -211,7 +225,7 @@ log "Running Dependency-Check..."
 docker run \
   --name dep-check \
   --user root \
-  -v "${APP_DIR}:/src:ro" \
+  -v "${APP_DIR}:/src" \
   -v "${REPORTS_DIR}:/report" \
   -v "${NVD_CACHE}:/usr/share/dependency-check/data" \
   owasp/dependency-check:latest \
