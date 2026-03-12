@@ -75,7 +75,10 @@ jobs:
           mkdir -p ~/security-scan/scripts
           mkdir -p ~/.dependency-check/data
           chmod -R 777 ~/security-scan/reports
-          chmod -R 777 ~/.dependency-check/data
+          # NVD cache may be owned by root from previous dep-check container run
+          # Fix ownership first, then set permissions
+          sudo chown -R "$(whoami)":"$(whoami)" ~/.dependency-check/data 2>/dev/null || true
+          chmod -R 777 ~/.dependency-check/data 2>/dev/null || true
           echo "✓ Workspace ready"
 
   # ── JOB 2: RUN SCANS ────────────────────────────────────────────────────────
