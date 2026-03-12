@@ -148,14 +148,38 @@ if [ "${SONAR_REACHABLE}" = "true" ]; then
   fi
 
   if [ "${SONAR_OK}" = "true" ]; then
-    sleep 5
+    # Wait for SonarQube to finish processing the analysis (5s is too short)
+    log "Waiting 30s for SonarQube to process analysis..."
+    sleep 30
+
+    # Poll SonarQube until analysis is complete (up to 2 minutes)
+    log "Waiting for SonarQube background task to finish..."
+    for i in $(seq 1 12); do
+      STATUS=$(curl -s -u "${SONAR_TOKEN}:" \
+        "${SONAR_HOST_URL}/api/ce/component?component=${SONAR_PROJECT_KEY}" \
+        | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "UNKNOWN")
+      log "  SonarQube task status: ${STATUS} (attempt ${i}/12)"
+      [ "${STATUS}" = "SUCCESS" ] && break
+      [ "${STATUS}" = "FAILED" ] && { warn "SonarQube background task FAILED"; break; }
+      sleep 10
+    done
+
     curl -s \
       -u "${SONAR_TOKEN}:" \
       "${SONAR_HOST_URL}/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&resolved=false&ps=500" \
       -o "${REPORTS_DIR}/sonarqube-report.json"
     SIZE=$(wc -c < "${REPORTS_DIR}/sonarqube-report.json" 2>/dev/null || echo 0)
-    ok "SonarQube report saved (${SIZE} bytes)"
-    SONAR_RESULT="passed"
+
+    # Validate the report has real content (not just an empty/error JSON)
+    if [ "${SIZE}" -gt 500 ]; then
+      ok "SonarQube report saved (${SIZE} bytes)"
+      SONAR_RESULT="passed"
+    else
+      warn "SonarQube report too small (${SIZE} bytes) — likely empty or error response"
+      warn "Raw content: $(cat ${REPORTS_DIR}/sonarqube-report.json 2>/dev/null || echo 'unreadable')"
+      # Keep the file anyway for debugging, mark as partial
+      SONAR_RESULT="partial"
+    fi
   else
     warn "SonarQube scan failed — continuing with Dependency-Check"
     SONAR_RESULT="failed"
@@ -266,57 +290,102 @@ do_import \
   "Dependency-Check" || true
 
 if [ "${IMPORT_COUNT}" -eq 0 ]; then
-  fail "All DefectDojo imports failed"
-  fail "Check:"
-  fail "  1. DEFECTDOJO_API_KEY — must be just the key value, no 'Token ' prefix"
-  fail "  2. DEFECTDOJO_ENGAGEMENT_ID — must be a valid numeric ID"
-  fail "  3. DEFECTDOJO_URL — must be http://localhost:8080"
-  exit 1
+  warn "All DefectDojo imports failed — pipeline will continue and bundle raw reports"
+  warn "Check:"
+  warn "  1. DEFECTDOJO_API_KEY — must be just the key value, no 'Token ' prefix"
+  warn "  2. DEFECTDOJO_ENGAGEMENT_ID — must be a valid numeric ID"
+  warn "  3. DEFECTDOJO_URL — must be http://localhost:8080"
+  DOJO_IMPORT_FAILED=true
+else
+  ok "${IMPORT_COUNT}/2 reports imported to DefectDojo"
+  DOJO_IMPORT_FAILED=false
 fi
-ok "${IMPORT_COUNT}/2 reports imported to DefectDojo"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Generate final report from DefectDojo
+# STEP 4 — Generate final report from DefectDojo (or bundle raw reports)
 # ─────────────────────────────────────────────────────────────────────────────
 log "-------------------------------------------------------"
 log "STEP 4: Generating final report"
 log "-------------------------------------------------------"
 
-sleep 15
+if [ "${DOJO_IMPORT_FAILED}" = "true" ]; then
+  warn "DefectDojo unavailable — bundling raw scan reports as final output"
 
-# Attempt 1: PDF
-log "Trying PDF report..."
-HTTP=$(curl -s \
-  -o "${REPORTS_DIR}/final-report.pdf" \
-  -w "%{http_code}" \
-  -X POST \
-  -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d "{\"engagement\":${DEFECTDOJO_ENGAGEMENT_ID},\"include_finding_notes\":true,\"include_executive_summary\":true,\"include_table_of_contents\":true}" \
-  "${DEFECTDOJO_URL}/api/v2/reports/generate/")
-SIZE=$(wc -c < "${REPORTS_DIR}/final-report.pdf" 2>/dev/null || echo 0)
+  # Build a summary JSON from raw reports
+  SONAR_SIZE=$(wc -c < "${REPORTS_DIR}/sonarqube-report.json" 2>/dev/null || echo 0)
+  DEPCHECK_SIZE=$(wc -c < "${REPORTS_DIR}/dependency-check-report.xml" 2>/dev/null || echo 0)
 
-if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 1000 ]; then
-  ok "PDF report generated (${SIZE} bytes)"
-  FINAL_FORMAT="pdf"
+  cat > "${REPORTS_DIR}/final-report.json" <<EOF
+{
+  "scan_summary": {
+    "sha": "${GIT_SHA:0:8}",
+    "branch": "${GIT_BRANCH}",
+    "date": "${RUN_DATE}",
+    "sonarqube_result": "${SONAR_RESULT}",
+    "dependency_check_result": "${DEPCHECK_RESULT}",
+    "defectdojo_import": "failed",
+    "note": "DefectDojo import failed. Raw reports are included in this artifact.",
+    "raw_reports": {
+      "sonarqube_report": "sonarqube-report.json (${SONAR_SIZE} bytes)",
+      "dependency_check_report": "dependency-check-report.xml (${DEPCHECK_SIZE} bytes)"
+    }
+  }
+}
+EOF
+  ok "Summary JSON written — raw reports also available in artifact"
+  FINAL_FORMAT="json"
+
 else
-  warn "PDF failed (HTTP ${HTTP}, ${SIZE} bytes) — trying JSON..."
-  rm -f "${REPORTS_DIR}/final-report.pdf"
+  sleep 15
 
-  # Attempt 2: JSON findings
+  # Attempt 1: PDF
+  log "Trying PDF report..."
   HTTP=$(curl -s \
-    -o "${REPORTS_DIR}/final-report.json" \
+    -o "${REPORTS_DIR}/final-report.pdf" \
     -w "%{http_code}" \
+    -X POST \
     -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
-    "${DEFECTDOJO_URL}/api/v2/findings/?engagement=${DEFECTDOJO_ENGAGEMENT_ID}&limit=500")
-  SIZE=$(wc -c < "${REPORTS_DIR}/final-report.json" 2>/dev/null || echo 0)
+    -H "Content-Type: application/json" \
+    -d "{\"engagement\":${DEFECTDOJO_ENGAGEMENT_ID},\"include_finding_notes\":true,\"include_executive_summary\":true,\"include_table_of_contents\":true}" \
+    "${DEFECTDOJO_URL}/api/v2/reports/generate/")
+  SIZE=$(wc -c < "${REPORTS_DIR}/final-report.pdf" 2>/dev/null || echo 0)
 
-  if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 10 ]; then
-    ok "JSON report generated (${SIZE} bytes)"
-    FINAL_FORMAT="json"
+  if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 1000 ]; then
+    ok "PDF report generated (${SIZE} bytes)"
+    FINAL_FORMAT="pdf"
   else
-    fail "All report formats failed"
-    exit 1
+    warn "PDF failed (HTTP ${HTTP}, ${SIZE} bytes) — trying JSON..."
+    rm -f "${REPORTS_DIR}/final-report.pdf"
+
+    # Attempt 2: JSON findings
+    HTTP=$(curl -s \
+      -o "${REPORTS_DIR}/final-report.json" \
+      -w "%{http_code}" \
+      -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+      "${DEFECTDOJO_URL}/api/v2/findings/?engagement=${DEFECTDOJO_ENGAGEMENT_ID}&limit=500")
+    SIZE=$(wc -c < "${REPORTS_DIR}/final-report.json" 2>/dev/null || echo 0)
+
+    if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 10 ]; then
+      ok "JSON report generated (${SIZE} bytes)"
+      FINAL_FORMAT="json"
+    else
+      warn "DefectDojo report fetch failed — falling back to raw reports bundle"
+      cat > "${REPORTS_DIR}/final-report.json" <<EOF
+{
+  "scan_summary": {
+    "sha": "${GIT_SHA:0:8}",
+    "branch": "${GIT_BRANCH}",
+    "date": "${RUN_DATE}",
+    "sonarqube_result": "${SONAR_RESULT}",
+    "dependency_check_result": "${DEPCHECK_RESULT}",
+    "defectdojo_import": "imported_but_report_fetch_failed",
+    "note": "Raw reports are included in this artifact."
+  }
+}
+EOF
+      ok "Fallback summary JSON written"
+      FINAL_FORMAT="json"
+    fi
   fi
 fi
 
