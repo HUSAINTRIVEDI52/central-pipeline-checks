@@ -286,7 +286,7 @@ do_import \
 
 do_import \
   "${REPORTS_DIR}/dependency-check-report.xml" \
-  "dependency-check" \
+  "Dependency Check" \
   "Dependency-Check" || true
 
 if [ "${IMPORT_COUNT}" -eq 0 ]; then
@@ -338,39 +338,21 @@ EOF
 else
   sleep 15
 
-  # Attempt 1: PDF
-  log "Trying PDF report..."
+  # Fetch findings JSON directly (PDF endpoint not available in this DefectDojo version)
+  log "Fetching findings from DefectDojo..."
   HTTP=$(curl -s \
-    -o "${REPORTS_DIR}/final-report.pdf" \
+    -o "${REPORTS_DIR}/final-report.json" \
     -w "%{http_code}" \
-    -X POST \
     -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d "{\"engagement\":${DEFECTDOJO_ENGAGEMENT_ID},\"include_finding_notes\":true,\"include_executive_summary\":true,\"include_table_of_contents\":true}" \
-    "${DEFECTDOJO_URL}/api/v2/reports/generate/")
-  SIZE=$(wc -c < "${REPORTS_DIR}/final-report.pdf" 2>/dev/null || echo 0)
+    "${DEFECTDOJO_URL}/api/v2/findings/?engagement=${DEFECTDOJO_ENGAGEMENT_ID}&limit=500")
+  SIZE=$(wc -c < "${REPORTS_DIR}/final-report.json" 2>/dev/null || echo 0)
 
-  if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 1000 ]; then
-    ok "PDF report generated (${SIZE} bytes)"
-    FINAL_FORMAT="pdf"
+  if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 10 ]; then
+    ok "DefectDojo findings report generated (${SIZE} bytes)"
+    FINAL_FORMAT="json"
   else
-    warn "PDF failed (HTTP ${HTTP}, ${SIZE} bytes) — trying JSON..."
-    rm -f "${REPORTS_DIR}/final-report.pdf"
-
-    # Attempt 2: JSON findings
-    HTTP=$(curl -s \
-      -o "${REPORTS_DIR}/final-report.json" \
-      -w "%{http_code}" \
-      -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
-      "${DEFECTDOJO_URL}/api/v2/findings/?engagement=${DEFECTDOJO_ENGAGEMENT_ID}&limit=500")
-    SIZE=$(wc -c < "${REPORTS_DIR}/final-report.json" 2>/dev/null || echo 0)
-
-    if [ "${HTTP}" = "200" ] && [ "${SIZE}" -gt 10 ]; then
-      ok "JSON report generated (${SIZE} bytes)"
-      FINAL_FORMAT="json"
-    else
-      warn "DefectDojo report fetch failed — falling back to raw reports bundle"
-      cat > "${REPORTS_DIR}/final-report.json" <<EOF
+    warn "DefectDojo report fetch failed (HTTP ${HTTP}, ${SIZE} bytes) — falling back to raw reports bundle"
+    cat > "${REPORTS_DIR}/final-report.json" <<EOF
 {
   "scan_summary": {
     "sha": "${GIT_SHA:0:8}",
@@ -383,9 +365,8 @@ else
   }
 }
 EOF
-      ok "Fallback summary JSON written"
-      FINAL_FORMAT="json"
-    fi
+    ok "Fallback summary JSON written"
+    FINAL_FORMAT="json"
   fi
 fi
 
