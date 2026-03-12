@@ -232,6 +232,7 @@ docker run \
   --project "localit-backend" \
   --scan /src \
   --format XML \
+  --format HTML \
   --out /report \
   --enableRetired \
   --disableAssembly \
@@ -247,11 +248,18 @@ sudo chown -R "$(whoami)":"$(whoami)" "${REPORTS_DIR}" 2>/dev/null || true
 
 if [ -f "${REPORTS_DIR}/dependency-check-report.xml" ]; then
   SIZE=$(wc -c < "${REPORTS_DIR}/dependency-check-report.xml")
-  ok "Dependency-Check report saved (${SIZE} bytes)"
+  ok "Dependency-Check XML report saved (${SIZE} bytes)"
   DEPCHECK_RESULT="passed"
 else
   warn "Dependency-Check failed or no report produced"
   DEPCHECK_RESULT="failed"
+fi
+
+if [ -f "${REPORTS_DIR}/dependency-check-report.html" ]; then
+  SIZE=$(wc -c < "${REPORTS_DIR}/dependency-check-report.html")
+  ok "Dependency-Check HTML report saved (${SIZE} bytes)"
+else
+  warn "HTML report not generated — only XML available"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
