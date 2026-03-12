@@ -1,16 +1,9 @@
 name: Security Scanning Pipeline
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GitHub Actions = thin trigger only.
-# All scans run on YOUR GCP VM via IAP SSH using the SA key.
-# Only the final report comes back here as a downloadable artifact.
-#
-# Secrets needed (all already set as Repository secrets):
-#   GCP_SA_KEY, GCP_PROJECT_ID, GCP_VM_NAME, GCP_VM_ZONE
-#   SONAR_HOST_URL, SONAR_TOKEN, SONAR_PROJECT_KEY
-#   NVD_API_KEY
-#   DEFECTDOJO_URL, DEFECTDOJO_API_KEY,
-#   DEFECTDOJO_ENGAGEMENT_ID, DEFECTDOJO_PRODUCT_ID
+# Self-hosted runner on GCP VM handles everything.
+# No IAP tunnel, no SSH, no gcloud compute ssh needed.
+# The runner IS on the VM — jobs run directly there.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -42,11 +35,11 @@ on:
 jobs:
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 1 — AUTH + VERIFY VM CONNECTION
+  # JOB 1 — PREPARE (runs on VM via self-hosted runner)
   # ───────────────────────────────────────────────────────────────────────────
   prepare:
-    name: "GCP Auth & VM Check"
-    runs-on: ubuntu-latest
+    name: "Prepare Scan Environment"
+    runs-on: self-hosted
     outputs:
       zap_mode:    ${{ steps.zap-mode.outputs.mode }}
       short_sha:   ${{ steps.meta.outputs.short_sha }}
@@ -54,21 +47,8 @@ jobs:
       report_name: ${{ steps.meta.outputs.report_name }}
 
     steps:
-      - name: Checkout
+      - name: Checkout code onto VM
         uses: actions/checkout@v4
-
-      - name: Authenticate to GCP via Service Account key
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      - name: Install gcloud beta components (needed for IAP tunnel)
-        run: gcloud components install beta --quiet 2>/dev/null || true
 
       - name: Set run metadata
         id: meta
@@ -92,245 +72,84 @@ jobs:
           else
             echo "mode=baseline" >> $GITHUB_OUTPUT
           fi
-          echo "ZAP mode set"
 
-      # ZONE FIX: zone and project passed THREE ways so gcloud is never confused:
-      #   1. CLOUDSDK_COMPUTE_ZONE env var
-      #   2. CLOUDSDK_CORE_PROJECT env var
-      #   3. --zone and --project explicit flags on every command
-      - name: Verify IAP SSH connection to GCP VM
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Verify Docker is available on VM
         run: |
-          gcloud compute ssh \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --ssh-flag="-o BatchMode=no" \
-            --ssh-flag="-o ConnectTimeout=30" \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }} \
-            --command="echo VM_OK"
-        timeout-minutes: 3
+          docker --version
+          docker ps
+
+      - name: Verify Node.js is available on VM
+        run: node --version
+
+      - name: Create reports directory
+        run: mkdir -p ~/security-scan/reports
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 2 — PUSH CODE TO GCP VM
-  # ───────────────────────────────────────────────────────────────────────────
-  sync-code:
-    name: "Push Code to GCP VM"
-    runs-on: ubuntu-latest
-    needs: prepare
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      - name: Create workspace directories on VM
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          gcloud compute ssh \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }} \
-            --command="mkdir -p ~/security-scan/app ~/security-scan/reports ~/security-scan/scripts && echo DIRS_OK"
-
-      - name: Copy repo to VM via IAP
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          gcloud compute scp \
-            --recurse \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            . \
-            ${{ secrets.GCP_VM_NAME }}:~/security-scan/app/
-
-      - name: Copy scan script to VM and make executable
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          gcloud compute scp \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            .github/scripts/run-all-scans.sh \
-            ${{ secrets.GCP_VM_NAME }}:~/security-scan/scripts/run-all-scans.sh
-
-          gcloud compute ssh \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }} \
-            --command="chmod +x ~/security-scan/scripts/run-all-scans.sh && echo SCRIPT_OK"
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # JOB 3 — RUN ALL SCANS ON GCP VM
+  # JOB 2 — RUN ALL SCANS (runs directly on VM)
   # ───────────────────────────────────────────────────────────────────────────
   run-scans:
     name: "Run All Scans on GCP VM"
-    runs-on: ubuntu-latest
-    needs: [prepare, sync-code]
+    runs-on: self-hosted
+    needs: prepare
 
     steps:
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      - name: SSH into VM and execute all scans
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Copy code to scan workspace
         run: |
-          gcloud compute ssh \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }} \
-            --command="
-              export ZAP_MODE='${{ needs.prepare.outputs.zap_mode }}'
-              export GIT_SHA='${{ github.sha }}'
-              export GIT_BRANCH='${{ github.ref_name }}'
-              export RUN_DATE='${{ needs.prepare.outputs.run_date }}'
-              export SONAR_HOST_URL='${{ secrets.SONAR_HOST_URL }}'
-              export SONAR_TOKEN='${{ secrets.SONAR_TOKEN }}'
-              export SONAR_PROJECT_KEY='${{ secrets.SONAR_PROJECT_KEY }}'
-              export NVD_API_KEY='${{ secrets.NVD_API_KEY }}'
-              export DEFECTDOJO_URL='${{ secrets.DEFECTDOJO_URL }}'
-              export DEFECTDOJO_API_KEY='${{ secrets.DEFECTDOJO_API_KEY }}'
-              export DEFECTDOJO_ENGAGEMENT_ID='${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}'
-              export DEFECTDOJO_PRODUCT_ID='${{ secrets.DEFECTDOJO_PRODUCT_ID }}'
-              bash ~/security-scan/scripts/run-all-scans.sh
-            "
+          mkdir -p ~/security-scan/app
+          cp -r . ~/security-scan/app/
+          cp .github/scripts/run-all-scans.sh ~/security-scan/scripts/run-all-scans.sh 2>/dev/null || true
+          chmod +x ~/security-scan/scripts/run-all-scans.sh
+          echo "Code copied to ~/security-scan/app/"
+
+      - name: Run all security scans
+        env:
+          ZAP_MODE:                   ${{ needs.prepare.outputs.zap_mode }}
+          GIT_SHA:                    ${{ github.sha }}
+          GIT_BRANCH:                 ${{ github.ref_name }}
+          RUN_DATE:                   ${{ needs.prepare.outputs.run_date }}
+          SONAR_HOST_URL:             ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN:                ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY:          ${{ secrets.SONAR_PROJECT_KEY }}
+          NVD_API_KEY:                ${{ secrets.NVD_API_KEY }}
+          DEFECTDOJO_URL:             ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY:         ${{ secrets.DEFECTDOJO_API_KEY }}
+          DEFECTDOJO_ENGAGEMENT_ID:   ${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}
+          DEFECTDOJO_PRODUCT_ID:      ${{ secrets.DEFECTDOJO_PRODUCT_ID }}
+        run: bash ~/security-scan/scripts/run-all-scans.sh
         timeout-minutes: 75
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 4 — PULL REPORT BACK AS GITHUB ARTIFACT
+  # JOB 3 — UPLOAD REPORT AS GITHUB ARTIFACT
   # ───────────────────────────────────────────────────────────────────────────
   collect-report:
-    name: "Pull Report → GitHub Artifact"
-    runs-on: ubuntu-latest
+    name: "Upload Report as GitHub Artifact"
+    runs-on: self-hosted
     needs: [prepare, run-scans]
     if: always() && needs.run-scans.result != 'cancelled'
 
     steps:
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      - name: Create local reports directory
-        run: mkdir -p ./reports
-
-      - name: Find and copy final report from VM
-        id: copy
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Find report file
+        id: find
         run: |
-          # Find which format the VM produced (PDF, HTML, or JSON)
-          REPORT=$(gcloud compute ssh \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }} \
-            --command="ls ~/security-scan/reports/final-report.* 2>/dev/null | head -1" \
-            2>/dev/null || echo "")
-
-          if [ -n "${REPORT}" ]; then
-            echo "Report found: ${REPORT}"
-            gcloud compute scp \
-              --project="${{ secrets.GCP_PROJECT_ID }}" \
-              --zone="${{ secrets.GCP_VM_ZONE }}" \
-              --tunnel-through-iap \
-              --strict-host-key-checking=no \
-              --quiet \
-              ${{ secrets.GCP_VM_NAME }}:"${REPORT}" ./reports/
+          REPORT=$(ls ~/security-scan/reports/final-report.* 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
             EXT="${REPORT##*.}"
-            mv "./reports/final-report.${EXT}" \
-               "./reports/${{ needs.prepare.outputs.report_name }}.${EXT}"
+            cp "$REPORT" \
+               ~/security-scan/reports/${{ needs.prepare.outputs.report_name }}.${EXT}
             echo "report_file=${{ needs.prepare.outputs.report_name }}.${EXT}" >> $GITHUB_OUTPUT
+            echo "Found report: $REPORT"
           else
-            echo "No final report found — pulling all raw scan reports"
-            gcloud compute scp \
-              --recurse \
-              --project="${{ secrets.GCP_PROJECT_ID }}" \
-              --zone="${{ secrets.GCP_VM_ZONE }}" \
-              --tunnel-through-iap \
-              --strict-host-key-checking=no \
-              --quiet \
-              ${{ secrets.GCP_VM_NAME }}:~/security-scan/reports/ \
-              ./reports/ || true
+            echo "No final report found — raw scan reports will be uploaded"
           fi
 
-      - name: Copy scan log from VM
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          gcloud compute scp \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }}:~/security-scan/reports/scan.log \
-            ./reports/scan.log 2>/dev/null || echo "No scan log found"
-
-          gcloud compute scp \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }}:~/security-scan/reports/app-startup.log \
-            ./reports/app-startup.log 2>/dev/null || echo "No app startup log found"
-
-      - name: Upload as GitHub artifact (30 days)
+      - name: Upload report as GitHub artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.prepare.outputs.report_name }}
-          path: ./reports/
+          path: ~/security-scan/reports/
           retention-days: 30
           if-no-files-found: warn
 
@@ -343,45 +162,27 @@ jobs:
           echo "| Commit | \`${{ needs.prepare.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Date | ${{ needs.prepare.outputs.run_date }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ZAP Mode | ${{ needs.prepare.outputs.zap_mode }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Ran on | GCP VM \`${{ secrets.GCP_VM_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Report | \`${{ steps.copy.outputs.report_file }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ran on | GCP VM (self-hosted runner) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Report | \`${{ steps.find.outputs.report_file }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download the report from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
 
   # ───────────────────────────────────────────────────────────────────────────
-  # JOB 5 — CLEANUP VM
+  # JOB 4 — CLEANUP VM WORKSPACE
   # ───────────────────────────────────────────────────────────────────────────
   cleanup:
     name: "Cleanup VM Workspace"
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: collect-report
     if: always()
 
     steps:
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-
-      - name: Remove containers and app code from VM
-        env:
-          CLOUDSDK_COMPUTE_ZONE: ${{ secrets.GCP_VM_ZONE }}
-          CLOUDSDK_CORE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Stop and remove scan containers
         run: |
-          gcloud compute ssh \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --zone="${{ secrets.GCP_VM_ZONE }}" \
-            --tunnel-through-iap \
-            --strict-host-key-checking=no \
-            --quiet \
-            ${{ secrets.GCP_VM_NAME }} \
-            --command="
-              docker rm -f zap-scan dep-check mongo-scan redis-scan 2>/dev/null || true
-              rm -rf ~/security-scan/app/
-              echo CLEANUP_DONE
-            "
+          docker rm -f zap-scan dep-check mongo-scan redis-scan 2>/dev/null || true
+          echo "Containers cleaned up"
+
+      - name: Remove app code from workspace
+        run: |
+          rm -rf ~/security-scan/app/
+          echo "Workspace cleaned up"
