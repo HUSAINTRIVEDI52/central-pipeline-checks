@@ -30,11 +30,6 @@ ok()   { echo "[$(date '+%H:%M:%S')] ✓ $*"; }
 warn() { echo "[$(date '+%H:%M:%S')] ⚠ WARNING: $*"; }
 fail() { echo "[$(date '+%H:%M:%S')] ✗ ERROR: $*"; }
 
-# ── PATH setup ────────────────────────────────────────────────────────────────
-export PATH="/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:$PATH"
-export NVM_DIR="${HOME}/.nvm"
-[ -s "${NVM_DIR}/nvm.sh" ] && source "${NVM_DIR}/nvm.sh"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # BANNER + VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,11 +56,8 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 ok "All required env vars present"
 
-# Check Docker
-if ! command -v docker &>/dev/null; then
-  fail "Docker not installed on VM"
-  exit 1
-fi
+# ── Check environment ─────────────────────────────────────────────────────────
+command -v docker &>/dev/null || { fail "Docker not found"; exit 1; }
 ok "Docker: $(docker --version | cut -d' ' -f3 | tr -d ',')"
 
 # ── Fix permissions upfront ───────────────────────────────────────────────────
