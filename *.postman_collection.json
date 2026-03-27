@@ -1,0 +1,43 @@
+{
+	"info": {
+		"name": "Dummy_Project_Collection",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"url": "http://localhost:3000/health"
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status is 200', () => pm.response.to.have.status(200));",
+							"pm.test('Check status UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "Get Tasks",
+			"request": {
+				"method": "GET",
+				"url": "http://localhost:3000/api/tasks"
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Response is an array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+						]
+					}
+				}
+			]
+		}
+	]
+}
