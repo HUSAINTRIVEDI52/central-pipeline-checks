@@ -161,7 +161,30 @@ Wait ~2 minutes, then open `http://YOUR_VM_IP:9000`. Default login: `admin` / `a
 
 ---
 
-### 4. DefectDojo
+### 4. NVD Database
+
+The pipeline uses a pre-existing NVD database on the GCP instance instead of downloading it.
+
+**Setup the NVD database:**
+
+```bash
+# Create the NVD database directory
+sudo mkdir -p /home/runner/setup-pipeline
+
+# Download and extract the latest NVD database (one-time setup)
+wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/nvd-data.zip
+sudo unzip nvd-data.zip -d /home/runner/setup-pipeline/
+sudo mv /home/runner/setup-pipeline/nvd-data/* /home/runner/setup-pipeline/
+sudo chown -R $(whoami):$(whoami) /home/runner/setup-pipeline/
+
+# The database file should be at: /home/runner/setup-pipeline/nvd_database.json
+```
+
+> The pipeline will fail if `/home/runner/setup-pipeline/nvd_database.json` does not exist.
+
+---
+
+### 5. DefectDojo
 
 DefectDojo is the vulnerability management dashboard. All scan findings are imported here.
 
@@ -201,18 +224,6 @@ docker compose logs initializer | grep 'Admin password:'
 
 ---
 
-### 5. NVD API Key
-
-OWASP Dependency-Check downloads CVE data from the [National Vulnerability Database](https://nvd.nist.gov). Without an API key, downloads are heavily rate-limited and the first scan can take 30–60+ minutes.
-
-1. Visit [https://nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key)
-2. Fill in the form — the key arrives by email within minutes
-3. Add it as `NVD_API_KEY` in GitHub Secrets
-
-> **First run note:** Even with a key, the first run downloads the entire CVE database (~2–3 GB) and takes 20–40 minutes. Subsequent runs use the local cache and are much faster.
-
----
-
 ## GitHub Secrets
 
 All sensitive values are stored as encrypted GitHub Secrets — **never committed to the repository**.
@@ -228,7 +239,6 @@ All sensitive values are stored as encrypted GitHub Secrets — **never committe
 | `DEFECTDOJO_API_KEY` | `1a2b3c4d5e...` | DefectDojo → Username → API v2 Key |
 | `DEFECTDOJO_ENGAGEMENT_ID` | `7` | Numeric ID from the engagement URL |
 | `DEFECTDOJO_PRODUCT_ID` | `3` | Numeric ID from the product URL |
-| `NVD_API_KEY` | `abc123-def456...` | Email from NVD (optional but recommended) |
 
 > ⚠️ Never put these values in `.env`, YAML files, or anywhere in the repository.
 

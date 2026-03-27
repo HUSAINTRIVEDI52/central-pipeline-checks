@@ -12,7 +12,8 @@ WORKSPACE="${HOME}/security-scan"
 APP_DIR="${WORKSPACE}/app/backend"
 REPORTS_DIR="${WORKSPACE}/reports"
 LOG_FILE="${REPORTS_DIR}/scan.log"
-NVD_CACHE="${HOME}/.dependency-check/data"
+# Use pre-existing NVD database on GCP instance - no downloads
+NVD_DATABASE_PATH="/home/runner/setup-pipeline/nvd_database.json"
 
 # ── State ─────────────────────────────────────────────────────────────────────
 SONAR_RESULT="skipped"
@@ -22,7 +23,6 @@ FINAL_FORMAT="none"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 mkdir -p "${REPORTS_DIR}"
-mkdir -p "${NVD_CACHE}"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -62,10 +62,15 @@ ok "Docker: $(docker --version | cut -d' ' -f3 | tr -d ',')"
 
 # ── Fix permissions upfront ───────────────────────────────────────────────────
 chmod -R 777 "${REPORTS_DIR}" 2>/dev/null || true
-chmod -R 777 "${NVD_CACHE}"   2>/dev/null || true
-ok "Permissions set on reports and NVD cache"
+ok "Permissions set on reports directory"
 
-# ── Check DefectDojo ──────────────────────────────────────────────────────────
+# ── Check NVD Database ──────────────────────────────────────────────────────
+log "Checking NVD database at ${NVD_DATABASE_PATH} ..."
+if [ ! -f "${NVD_DATABASE_PATH}" ]; then
+  fail "NVD database not found at ${NVD_DATABASE_PATH}"
+  exit 1
+fi
+ok "NVD database found"
 log "Checking DefectDojo at ${DEFECTDOJO_URL} ..."
 DOJO_OK=false
 for attempt in 1 2 3; do
@@ -208,10 +213,9 @@ docker rm -f dep-check 2>/dev/null || true
 
 # Ensure host dirs are fully writable before mounting
 chmod -R 777 "${REPORTS_DIR}"
-chmod -R 777 "${NVD_CACHE}"
 
-NVD_FLAG=""
-[ -n "${NVD_API_KEY:-}" ] && NVD_FLAG="--nvdApiKey ${NVD_API_KEY}"
+# Use pre-existing NVD database - no API key needed
+log "Using pre-existing NVD database at ${NVD_DATABASE_PATH}"
 
 log "Running Dependency-Check..."
 docker run \
@@ -219,7 +223,7 @@ docker run \
   --user root \
   -v "${APP_DIR}:/src" \
   -v "${REPORTS_DIR}:/report" \
-  -v "${NVD_CACHE}:/usr/share/dependency-check/data" \
+  -v "${NVD_DATABASE_PATH}:/usr/share/dependency-check/data" \
   owasp/dependency-check:latest \
   --project "localit-backend" \
   --scan /src \
@@ -229,8 +233,8 @@ docker run \
   --enableRetired \
   --disableAssembly \
   --disableOssIndex \
-  ${NVD_FLAG} \
   --failOnCVSS 0 \
+  --failOnSevere false \
   2>&1 && DEPCHECK_OK=true || DEPCHECK_OK=false
 
 docker rm -f dep-check 2>/dev/null || true

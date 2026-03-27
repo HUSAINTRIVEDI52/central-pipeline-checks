@@ -48,12 +48,7 @@ jobs:
           mkdir -p ~/security-scan/reports
           mkdir -p ~/security-scan/app
           mkdir -p ~/security-scan/scripts
-          mkdir -p ~/.dependency-check/data
           chmod -R 777 ~/security-scan/reports
-          # NVD cache may be owned by root from previous dep-check container run
-          # Fix ownership first, then set permissions
-          sudo chown -R "$(whoami)":"$(whoami)" ~/.dependency-check/data 2>/dev/null || true
-          chmod -R 777 ~/.dependency-check/data 2>/dev/null || true
           echo "✓ Workspace ready"
 
   # ── JOB 2: RUN SCANS ────────────────────────────────────────────────────────
@@ -84,7 +79,6 @@ jobs:
           SONAR_HOST_URL:           ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN:              ${{ secrets.SONAR_TOKEN }}
           SONAR_PROJECT_KEY:        ${{ secrets.SONAR_PROJECT_KEY }}
-          NVD_API_KEY:              ${{ secrets.NVD_API_KEY }}
           DEFECTDOJO_URL:           ${{ secrets.DEFECTDOJO_URL }}
           DEFECTDOJO_API_KEY:       ${{ secrets.DEFECTDOJO_API_KEY }}
           DEFECTDOJO_ENGAGEMENT_ID: ${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}
