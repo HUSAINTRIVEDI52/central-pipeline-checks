@@ -12,7 +12,7 @@ WORKSPACE="${HOME}/security-scan"
 APP_DIR="${WORKSPACE}/app/backend"
 REPORTS_DIR="${WORKSPACE}/reports"
 LOG_FILE="${REPORTS_DIR}/scan.log"
-# Use pre-existing NVD database on GCP instance - no downloads
+# Use pre-existing NVD database on runner instance - no downloads
 NVD_DATABASE_PATH="/home/runner/setup-pipeline/nvd_database.json"
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -34,7 +34,7 @@ fail() { echo "[$(date '+%H:%M:%S')] ✗ ERROR: $*"; }
 # BANNER + VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
 log "======================================================="
-log " Security Scan — GCP VM"
+log " Security Scan — Pipeline"
 log " SHA:    ${GIT_SHA:0:8}"
 log " Branch: ${GIT_BRANCH}"
 log " Date:   ${RUN_DATE}"
@@ -42,7 +42,7 @@ log "======================================================="
 
 REQUIRED=(
   GIT_SHA GIT_BRANCH RUN_DATE
-  SONAR_HOST_URL SONAR_TOKEN SONAR_PROJECT_KEY
+  SONAR_HOST_URL SONAR_TOKEN
   DEFECTDOJO_URL DEFECTDOJO_API_KEY
   DEFECTDOJO_ENGAGEMENT_ID DEFECTDOJO_PRODUCT_ID
 )
@@ -109,14 +109,48 @@ done
   warn "SonarQube not reachable — SAST skipped"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — SonarQube SAST
+# STEP 1 — SonarQube Project Setup & SAST
 # ─────────────────────────────────────────────────────────────────────────────
 log "-------------------------------------------------------"
-log "STEP 1: SonarQube SAST"
+log "STEP 1: SonarQube Project Setup & SAST"
 log "-------------------------------------------------------"
 
 if [ "${SONAR_REACHABLE}" = "true" ]; then
   cd "${APP_DIR}"
+
+  # --- Auto-generate Project Key from Project Name ---
+  if [ -f "package.json" ]; then
+    log "Extracting project name from package.json..."
+    PROJECT_NAME=$(grep -m 1 '"name":' package.json | cut -d'"' -f4 || echo "unknown-project")
+    # Generate key: lowercase, replace non-alphanumeric (except . - _ :) with -
+    SONAR_PROJECT_KEY=$(echo "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._:-]/-/g')
+    ok "Derived SonarQube project key: ${SONAR_PROJECT_KEY}"
+  else
+    warn "package.json not found in ${APP_DIR}, falling back to manual or default key"
+    SONAR_PROJECT_KEY="${SONAR_PROJECT_KEY:-default-project-key}"
+    PROJECT_NAME="${SONAR_PROJECT_KEY}"
+  fi
+
+  # --- Ensure SonarQube Project Exists ---
+  log "Checking if project '${SONAR_PROJECT_KEY}' exists in SonarQube..."
+  # SonarQube search API returns 200 even if not found, we check the body
+  PROJECT_EXISTS=$(curl -s -u "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/projects/search?projects=${SONAR_PROJECT_KEY}" | grep -q "\"key\":\"${SONAR_PROJECT_KEY}\"" && echo "true" || echo "false")
+
+  if [ "${PROJECT_EXISTS}" = "false" ]; then
+    log "Project not found. Creating project '${SONAR_PROJECT_KEY}' (Name: ${PROJECT_NAME})..."
+    CREATE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -u "${SONAR_TOKEN}:" -X POST \
+      "${SONAR_HOST_URL}/api/projects/create" \
+      -d "name=${PROJECT_NAME}" \
+      -d "project=${SONAR_PROJECT_KEY}")
+    
+    if [ "${CREATE_STATUS}" = "200" ] || [ "${CREATE_STATUS}" = "201" ]; then
+      ok "Project created successfully (HTTP ${CREATE_STATUS})"
+    else
+      warn "Failed to create project (HTTP ${CREATE_STATUS}). Attempting scan anyway..."
+    fi
+  else
+    ok "Project '${SONAR_PROJECT_KEY}' already exists"
+  fi
   SONAR_OK=false
 
   if command -v sonar-scanner &>/dev/null; then

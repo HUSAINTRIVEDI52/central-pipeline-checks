@@ -53,7 +53,7 @@ jobs:
 
   # ── JOB 2: RUN SCANS ────────────────────────────────────────────────────────
   run-scans:
-    name: "Run Scans on GCP VM"
+    name: "Run Security Scans"
     runs-on: self-hosted
     needs: prepare
 
@@ -78,7 +78,6 @@ jobs:
           RUN_DATE:                 ${{ needs.prepare.outputs.run_date }}
           SONAR_HOST_URL:           ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN:              ${{ secrets.SONAR_TOKEN }}
-          SONAR_PROJECT_KEY:        ${{ secrets.SONAR_PROJECT_KEY }}
           DEFECTDOJO_URL:           ${{ secrets.DEFECTDOJO_URL }}
           DEFECTDOJO_API_KEY:       ${{ secrets.DEFECTDOJO_API_KEY }}
           DEFECTDOJO_ENGAGEMENT_ID: ${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}
@@ -127,7 +126,7 @@ jobs:
           echo "| Commit | \`${{ needs.prepare.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Date | ${{ needs.prepare.outputs.run_date }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Scans | SonarQube SAST + Dependency-Check SCA |" >> $GITHUB_STEP_SUMMARY
-          echo "| Runner | GCP VM self-hosted |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner | Self-hosted runner |" >> $GITHUB_STEP_SUMMARY
           echo "| Report | \`${{ steps.find.outputs.report_file }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download the report from the Artifacts section above." >> $GITHUB_STEP_SUMMARY
