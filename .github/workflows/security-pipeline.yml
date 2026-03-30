@@ -16,7 +16,7 @@ jobs:
   # ── JOB 1: PREPARE ──────────────────────────────────────────────────────────
   prepare:
     name: "Prepare"
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       short_sha:   ${{ steps.meta.outputs.short_sha }}
       run_date:    ${{ steps.meta.outputs.run_date }}
